@@ -13,18 +13,21 @@ const { Client } = require('pg')
 const PORT = process.env.PORT || 4000
 const INDEX = path.join(__dirname, 'index.html')
 
-//----------------------------------- TRACE --------------------------------------------
-const SHOW_WS_CANDLES = true
-const SHOW_WS_DEPTH = false;
-
 //////////////////////////////////////////////////////////////////////////////////
-//////////////////////////////////////////////////////////////////////////////////
-//         PLEASE EDIT THE FOLLOWING VARIABLES JUST BELLOW
-//////////////////////////////////////////////////////////////////////////////////
+// Trace log
 //////////////////////////////////////////////////////////////////////////////////
 
-const insert_into_db = false
-const pg_connectionString = 'postgres://postgres@127.0.0.1:5432/postgres'
+const SHOW_WS_INITIAL_CANDLES = false
+const SHOW_WS_CANDLES = false
+const SHOW_WS_DEPTH = true
+const SHOW_WS_TRADE = false
+
+//////////////////////////////////////////////////////////////////////////////////
+// Parameters
+//////////////////////////////////////////////////////////////////////////////////
+// Database
+const insert_into_db = true
+const pg_connectionString = 'postgres://postgres@127.0.0.1:5432/nbt'
 const pg_connectionSSL = false
 
 // to monitor your strategy you can send your buy and sell signals to http://bitcoinvsaltcoins.com
@@ -36,12 +39,14 @@ const wait_time = 800
 
 const nbt_vers = "0.2.0"
 
+const CANDLE_SIZE = '15m'
 //////////////////////////////////////////////////////////////////////////////////
 //////////////////////////////////////////////////////////////////////////////////
 //////////////////////////////////////////////////////////////////////////////////
 
 console.log("insert_into_db: ", insert_into_db)
 console.log("send_signal_to_bva: ", send_signal_to_bva)
+console.log("Candle size: ", CANDLE_SIZE)
 
 /////////////////////
 
@@ -124,8 +129,9 @@ const binance_client = binance()
 async function run() {
 /*    pairs = await get_pairs()
     pairs = pairs.slice(0, tracked_max)*/
-    //pairs.unshift('BTCUSDT')
-    pairs.unshift('ADAUSDT')
+    pairs.unshift('BTCUSDT')
+    //pairs.unshift('ADAUSDT')
+
     console.log(" ")
     console.log("Total pairs: " + pairs.length)
     console.log(" ")
@@ -152,18 +158,16 @@ async function get_pairs() {
 }
 
 async function trackData() {
-    console.log('---- trackData() START ----')
 	for (var i = 0, len = pairs.length; i < len; i++) {
         console.log('--> ' + pairs[i])
         if (insert_into_db) await createPgPairTable(pairs[i])
         await trackPairData(pairs[i])
 		await sleep(wait_time)         //let's be safe with the api binance calls
     }
-    console.log('---- trackData() END ----')
 }
 
 async function trackPairData(pair) {
-    console.log('>>>>>>>>>>>>>>>>>>>>>>>>>>>> trackPairData(' + pair + ')')
+    console.log(`----- trackPairData(${pair}) -----`.magenta)
     sum_bids[pair] = []
     sum_asks[pair] = []
     first_bid_qty[pair] = new BigNumber(0)
@@ -184,8 +188,14 @@ async function trackPairData(pair) {
     prev_price[pair] = 0
     srsi[pair] = null
 
-    console.log('Getting initial data (last 500 15m candles for ' + pair + ')')
-    const candles_15 = await binance_client.candles({ symbol: pair, interval: '15m' })
+    if (SHOW_WS_INITIAL_CANDLES) {
+        console.log(`Getting initial data (last ${CANDLE_SIZE} candles for ${pair})`.yellow)
+    }
+
+    const candles_15 = await binance_client.candles({ symbol: pair, interval: CANDLE_SIZE })
+    if (SHOW_WS_INITIAL_CANDLES) {
+        console.log(`Initial candles: ${candles_15.length}`.yellow)
+    }
     for (var i = 0, len = candles_15.length; i < len; i++) {
         candle_closes[pair].push(Number(candles_15[i].close))
         candle_lowes[pair].push(Number(candles_15[i].low))
@@ -196,19 +206,22 @@ async function trackPairData(pair) {
     }
     await sleep(wait_time)
 
-    console.log('Initing WS - getting candles for ' + pair)
-    const candles_clean = binance_client.ws.candles(pair, '15m', async candle => {
+    if (SHOW_WS_CANDLES) {
+        console.log(`Initing WS - getting candles for ${pair}`.magenta)
+    }
+    const candles_clean = binance_client.ws.candles(pair, CANDLE_SIZE, async candle => {
         if (SHOW_WS_CANDLES) {
-            console.log(`WS CANDLE[${pair} - O:${candle.open}, C:${candle.close}, L:${candle.high}, H:${candle.high}, Vol:${candle.volume}`)
-            console.log('WS CANDLE[' + pair + '] - ', candle)
+            console.log(`WS CANDLE[${pair} - O:${candle.open}, C:${candle.close}, L:${candle.high}, H:${candle.high}, Vol:${candle.volume}`.yellow)
+            //console.log('WS CANDLE[' + pair + '] - ', candle)
         }
         if (candle.isFinal) {
+            // update last
             candle_opens[pair][candle_opens[pair].length-1] = Number(candle.open)
             candle_closes[pair][candle_closes[pair].length-1] = Number(candle.close)
             candle_lowes[pair][candle_lowes[pair].length-1] = Number(candle.low)
             candle_highs[pair][candle_highs[pair].length-1] = Number(candle.high)
             candle_volumes[pair][candle_volumes[pair].length-1] = Number(candle.volume)
-            // //
+            // add new
             candle_opens[pair].push(Number(candle.open))
             candle_closes[pair].push(Number(candle.close))
             candle_lowes[pair].push(Number(candle.low))
@@ -216,34 +229,41 @@ async function trackPairData(pair) {
             candle_volumes[pair].push(Number(candle.volume))
         }
         else {
+            // update last
             candle_opens[pair][candle_opens[pair].length-1] = Number(candle.open)
             candle_closes[pair][candle_closes[pair].length-1] = Number(candle.close)
             candle_lowes[pair][candle_lowes[pair].length-1] = Number(candle.low)
             candle_highs[pair][candle_highs[pair].length-1] = Number(candle.high)
             candle_volumes[pair][candle_volumes[pair].length-1] = Number(candle.volume)
         }
+        // add 'close' as price
         candle_prices[pair].push(Number(candle.close))
 
         try {
             await tulind.indicators.stochrsi.indicator([candle_closes[pair]], [100] )
             .then((results) => {
+                //console.log('stochrsi.indicator: ', results)
                 srsi[pair] = new BigNumber(results[0][results[0].length-1] * 100)
-                console.log('stochrsi[' + pair + ']: ' + srsi[pair])
+                if (SHOW_WS_CANDLES) {
+                    console.log(`stochrsi[${pair}]: ${srsi[pair]}`.yellow)
+                }
             })
         }
         catch(e) {
-            console.log(pair, "SRSI ERROR!!!")
-            //console.log(e)
+            console.log(pair, "SRSI ERROR!!!".red)
+            console.log(e)
             srsi[pair] = null
         }
-
     })
     await sleep(wait_time)
 
-    console.log('Initing WS - getting partial depth for ' + pair)
+    if (SHOW_WS_DEPTH) {
+        console.log(`Initing WS - getting partial depth for ${pair}`.magenta)
+    }
     const depth_clean = binance_client.ws.partialDepth({ symbol: pair, level: 10 }, depth => {
         if (SHOW_WS_DEPTH) {
-            console.log('WS DEPTH[' + pair + ']')
+            console.log(`WS DEPTH[${pair}]`.yellow)
+            //console.log(depth)
         }
         sum_bids[pair].push(_.sumBy(depth.bids, (o) => { return Number(o.quantity) }))
         sum_asks[pair].push(_.sumBy(depth.asks, (o) => { return Number(o.quantity) }))
@@ -252,12 +272,16 @@ async function trackPairData(pair) {
         first_bid_price[pair] = BigNumber(depth.bids[0].price)
         first_ask_price[pair] = BigNumber(depth.asks[0].price)
     })
-
     await sleep(wait_time)
 
-    console.log('Initing WS - getting trades for ' + pair)
+    if (SHOW_WS_TRADE) {
+        console.log(`Initing WS - getting trades for ${pair}`.magenta)
+    }
     const trades_clean = binance_client.ws.trades([pair], trade => {
-        console.log('WS TRADE[' + pair + '] - ' + trade.eventType + ' Q:' + trade.quantity + ', P:' + trade.price)
+        if (SHOW_WS_TRADE) {
+            console.log(`WS TRADE[${pair}] - ${trade.eventType} - Q:${trade.quantity}, P:${trade.price}`.yellow)
+            //console.log('trade:', trade)
+        }
         prices[pair] = BigNumber(trade.price)
         volumes[pair].unshift({
             'timestamp': Date.now(), 
@@ -269,7 +293,7 @@ async function trackPairData(pair) {
         })
     })
 
-    console.log('Initing main loop for ' + pair)
+    console.log(`Initing main loop for ${pair}`.bgMagenta)
     setInterval( () => {
 
         let depth_report = ""

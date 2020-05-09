@@ -258,10 +258,13 @@ async function backtest(lines) {
 async function run() {
     console.log("Retrieving DB data...".green)
     const lines = await getData(test_pair)
+
     console.log("Running backtest... ".green + lines.length)
     let startbt = Date.now()
+
     console.log("starting backtest... ".green )
     await backtest(lines)
+
     console.log("Ending backtest... ".green + parseInt((Date.now() - startbt)/1000) )
         
     process.exit(0)
